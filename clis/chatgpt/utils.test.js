@@ -2159,3 +2159,76 @@ describe('chatgpt project file upload helper', () => {
         });
     });
 });
+
+describe('chatgpt October 2026 redesign markup', () => {
+    it('keeps identical turns while deduplicating nested markup and reading the role suffix', async () => {
+        const page = createDomEvaluatePage([0, 1].map(index => `
+            <article data-testid="conversation-turn-${index}" data-chatgpt-search-unit-key="assistant-topic-${index}:user">
+                <div data-message-author-role="user"><div class="markdown">Again</div></div>
+            </article>
+            <article data-chatgpt-search-unit-key="turn-${index}:assistant">
+                <div data-message-author-role="assistant"><div class="markdown">Same answer</div></div>
+            </article>
+        `).join(''));
+        for (const node of page.dom.window.document.querySelectorAll('*')) {
+            node.getBoundingClientRect = () => ({ width: 120, height: 36 });
+        }
+        try {
+            const rows = await getVisibleMessages(page, { textOnly: true });
+            expect(rows.map(row => [row.Role, row.Text])).toEqual([
+                ['User', 'Again'], ['Assistant', 'Same answer'],
+                ['User', 'Again'], ['Assistant', 'Same answer'],
+            ]);
+        } finally { page.dom.window.close(); }
+    });
+
+    it('reads search-unit turns and strips tool chips from the user prompt', async () => {
+        const page = createDomEvaluatePage(`
+            <div data-chatgpt-search-unit-key="fallback-turn-0:0:user">
+              <div data-user-message-bubble="true">
+                <div data-search-result-target="">
+                  <p><span data-prompt-link-href="chatgpt-system-hint://search" data-prompt-link-label="Web search">Web search</span>find the release date</p>
+                </div>
+                <button aria-label="Copy message">copy</button>
+              </div>
+            </div>
+            <div data-chatgpt-search-unit-key="fallback-turn-0:2:assistant">
+              <h4 data-conversation-role="assistant">ChatGPT said:</h4>
+              <div data-markdown-copy="contents"><p>It shipped on 6 May 2025.</p></div>
+            </div>
+        `);
+        for (const node of page.dom.window.document.querySelectorAll('*')) {
+            node.getBoundingClientRect = () => ({ width: 120, height: 36 });
+        }
+
+        await expect(getVisibleMessages(page, { textOnly: true })).resolves.toEqual([
+            { Index: 1, Role: 'User', Text: 'find the release date', Html: '' },
+            { Index: 2, Role: 'Assistant', Text: 'It shipped on 6 May 2025.', Html: '' },
+        ]);
+    });
+
+    it('reads Deep Research sources from report_message citations', () => {
+        const payload = makeDeepResearchPayload();
+        const state = JSON.parse(payload.mapping.report_node.message.metadata.chatgpt_sdk.widget_state);
+        state.report_message.metadata = {
+            citations: [{ metadata: { title: 'Cited E', url: 'https://example.com/e#:~:text=quote' } }],
+        };
+        payload.mapping.report_node.message.metadata.chatgpt_sdk.widget_state = JSON.stringify(state);
+
+        const result = __test__.extractDeepResearchFromConversationPayload(payload);
+
+        expect(result.sources).toEqual([{ title: 'Cited E', url: 'https://example.com/e' }]);
+    });
+
+    it('ignores conversation sub-resource responses in network capture', () => {
+        const result = __test__.extractDeepResearchFromNetworkEntries([
+            { url: 'https://chatgpt.com/backend-api/conversation/requested123/stream_status', responsePreview: '{"status":"done"}' },
+            {
+                url: 'https://chatgpt.com/backend-api/conversation/requested123',
+                responsePreview: JSON.stringify(makeDeepResearchPayload(makeDeepResearchReport(), { conversationId: 'requested123' })),
+            },
+        ], { expectedConversationId: 'requested123' });
+
+        expect(result.status).toBe('completed');
+    });
+});

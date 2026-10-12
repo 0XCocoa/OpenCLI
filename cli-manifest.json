@@ -7948,9 +7948,8 @@
       {
         "name": "model",
         "type": "str",
-        "default": "instant",
         "required": false,
-        "help": "Model to use: instant, expert, or vision",
+        "help": "Explicitly select a model; omitted uses the current DeepSeek model",
         "choices": [
           "instant",
           "expert",
@@ -17349,7 +17348,8 @@
       "following",
       "posts",
       "verified",
-      "bio"
+      "bio",
+      "avatar_url"
     ],
     "type": "js",
     "modulePath": "instagram/profile.js",
@@ -17497,7 +17497,8 @@
       "name",
       "verified",
       "private",
-      "url"
+      "url",
+      "avatar_url"
     ],
     "type": "js",
     "modulePath": "instagram/search.js",
@@ -30067,7 +30068,7 @@
     "name": "search",
     "description": "Search Reddit Posts",
     "access": "read",
-    "domain": "reddit.com",
+    "domain": "www.reddit.com",
     "strategy": "cookie",
     "browser": true,
     "args": [
@@ -30125,7 +30126,7 @@
     "type": "js",
     "modulePath": "reddit/search.js",
     "sourceFile": "reddit/search.js",
-    "navigateBefore": "https://reddit.com"
+    "navigateBefore": false
   },
   {
     "site": "reddit",
@@ -36618,7 +36619,8 @@
     "columns": [
       "screen_name",
       "name",
-      "bio"
+      "bio",
+      "verified"
     ],
     "type": "js",
     "modulePath": "twitter/followers.js",
@@ -36653,7 +36655,8 @@
       "screen_name",
       "name",
       "bio",
-      "followers"
+      "followers",
+      "verified"
     ],
     "type": "js",
     "modulePath": "twitter/following.js",
@@ -37548,7 +37551,8 @@
       "media_urls",
       "media_posters",
       "card",
-      "quoted_tweet"
+      "quoted_tweet",
+      "author_verified"
     ],
     "type": "js",
     "modulePath": "twitter/search.js",
@@ -37598,7 +37602,8 @@
       "media_urls",
       "media_posters",
       "card",
-      "quoted_tweet"
+      "quoted_tweet",
+      "author_verified"
     ],
     "type": "js",
     "modulePath": "twitter/thread.js",
@@ -37655,7 +37660,8 @@
       "media_urls",
       "media_posters",
       "card",
-      "quoted_tweet"
+      "quoted_tweet",
+      "author_verified"
     ],
     "type": "js",
     "modulePath": "twitter/timeline.js",
