@@ -13,6 +13,7 @@ export type Action =
   | 'cookies'
   | 'screenshot'
   | 'close-window'
+  | 'close-owned-tab'
   | 'sessions'
   | 'set-file-input'
   | 'insert-text'
