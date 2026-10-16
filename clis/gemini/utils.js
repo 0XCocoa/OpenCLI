@@ -482,7 +482,7 @@ function getTurnsScript() {
     })()
   `;
 }
-function prepareComposerScript() {
+function prepareComposerScript(native = false) {
     return `
     (() => {
       ${buildGeminiComposerLocatorScript()}
@@ -497,11 +497,13 @@ function prepareComposerScript() {
         const selection = window.getSelection();
         const range = document.createRange();
         range.selectNodeContents(composer);
-        range.collapse(false);
+        // Native insertText replaces the selection without destroying Quill's
+        // paragraph nodes or desynchronizing its internal document state.
+        ${native ? '' : `range.collapse(false);`}
         selection?.removeAllRanges();
         selection?.addRange(range);
-        composer.textContent = '';
-        composer.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteContentBackward' }));
+        ${native ? '' : `composer.textContent = '';
+        composer.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteContentBackward' }));`}
       } catch (error) {
         return {
           ok: false,
@@ -1097,6 +1099,22 @@ export async function ensureGeminiPage(page) {
         await page.goto(GEMINI_APP_URL, { waitUntil: 'load', settleMs: 2500 });
         await page.wait(1);
     }
+    // Reused adapter tabs can be inactive after another site ran. Gemini's
+    // response animation then stays pending even when the model has finished.
+    // tabs() is session-scoped; only activate this session's Gemini target.
+    if (typeof page.tabs === 'function' && typeof page.selectTab === 'function') {
+        const tabs = await page.tabs();
+        const candidates = Array.isArray(tabs) ? tabs.filter((tab) => {
+            try { return new URL(tab.url).hostname === GEMINI_DOMAIN; }
+            catch { return false; }
+        }) : [];
+        const targetId = page.getActivePage?.();
+        const target = candidates.find((tab) => tab.page === targetId)
+            ?? (candidates.length === 1 ? candidates[0] : null);
+        if (target?.active === false && typeof target.page === 'string') {
+            await page.selectTab(target.page);
+        }
+    }
 }
 export async function getCurrentGeminiUrl(page) {
     await ensureGeminiPage(page);
@@ -1256,7 +1274,9 @@ export async function waitForGeminiSubmission(page, before, timeoutSeconds) {
     const preSendAssistantCount = before.turns.filter((turn) => turn.Role === 'Assistant').length;
     const maxPolls = Math.max(1, Math.ceil(timeoutSeconds));
     for (let index = 0; index < maxPolls; index += 1) {
-        await page.wait(index === 0 ? 0.5 : 1);
+        // Numeric wait() settles the DOM and may return after only 500ms.
+        // Explicit time waits preserve the caller's timeout during quiet reasoning.
+        await page.wait({ time: Math.min(1, timeoutSeconds - index) });
         const current = await readGeminiSnapshot(page);
         const structuredAppend = diffTrustedStructuredTurns(before, current);
         const transcriptDelta = diffTranscriptLines(before, current);
@@ -1296,7 +1316,7 @@ export async function sendGeminiMessage(page, text) {
     await ensureGeminiPage(page);
     let prepared;
     for (let attempt = 0; attempt < GEMINI_COMPOSER_PREPARE_ATTEMPTS; attempt += 1) {
-        prepared = await page.evaluate(prepareComposerScript());
+        prepared = await page.evaluate(prepareComposerScript(typeof page.nativeType === 'function'));
         if (prepared?.ok)
             break;
         if (attempt < GEMINI_COMPOSER_PREPARE_ATTEMPTS - 1)
@@ -2558,7 +2578,8 @@ export async function waitForGeminiResponse(page, baseline, promptText, timeoutS
     let transcriptStableCount = 0;
     let transcriptMissCount = 0;
     for (let index = 0; index < maxPolls; index += 1) {
-        await page.wait(index === 0 ? 1 : 2);
+        // Do not count a DOM-stability wait as two seconds of response time.
+        await page.wait({ time: Math.min(2, timeoutSeconds - index * 2) });
         const current = await readGeminiSnapshot(page);
         const structuredCandidate = pickStructuredReplyCandidate(current);
         if (structuredCandidate) {
