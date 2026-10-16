@@ -81,6 +81,8 @@ export const CHATGPT_TOOL_CHOICES = Object.keys(CHATGPT_TOOL_OPTIONS);
 
 // Selectors
 const COMPOSER_SELECTORS = [
+    'form[data-chatgpt-composer] .ProseMirror[contenteditable="true"]',
+    'form[data-composer-placement="thread"] .ProseMirror[contenteditable="true"]',
     '[contenteditable="true"][role="textbox"]',
     '#prompt-textarea[contenteditable="true"]',
     '[aria-label="Chat with ChatGPT"]',
@@ -118,9 +120,12 @@ function buildComposerLocatorScript() {
     const markerAttr = 'data-opencli-chatgpt-composer';
     return `
       const isVisible = (el) => {
-        if (!(el instanceof HTMLElement)) return false;
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        if (!(el instanceof HTMLElement) || el.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+        for (let node = el; node; node = node.parentElement) {
+          const style = window.getComputedStyle(node);
+          if (style.display === 'none' || style.visibility === 'hidden' ||
+              (style.opacity !== '' && Number(style.opacity) < 0.01)) return false;
+        }
         const rect = el.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
@@ -135,6 +140,7 @@ function buildComposerLocatorScript() {
       const findComposer = () => {
         for (const selector of ${JSON.stringify(COMPOSER_SELECTORS)}) {
           const candidates = Array.from(document.querySelectorAll(selector)).filter(c => c instanceof HTMLElement && isVisible(c));
+          if (candidates.length > 1) return null;
           const node = candidates.find(c => c.isContentEditable) || candidates[0];
           if (node instanceof HTMLElement) {
             clearMarkers(node);
@@ -1191,9 +1197,8 @@ async function fillChatGPTMessage(page, text) {
         // Fallback: use execCommand
         await page.evaluate(`
             (() => {
-                var composer = null;
-                var sels = ${JSON.stringify(COMPOSER_SELECTORS)};
-                for (var si = 0; si < sels.length; si++) { composer = document.querySelector(sels[si]); if (composer) break; }
+                ${buildComposerLocatorScript()}
+                const composer = findComposer();
                 if (!composer) return;
                 composer.focus();
                 document.execCommand('insertText', false, ${JSON.stringify(text)});
@@ -1225,8 +1230,12 @@ async function submitChatGPTMessage(page) {
                     && isVisible(button)
                     && !button.disabled
                     && button.getAttribute('aria-disabled') !== 'true';
-                const form = Array.from(document.querySelectorAll('form')).find((node) => node instanceof HTMLElement && isVisible(node));
-                const root = form || document.body;
+                const composer = (() => {
+                    ${buildComposerLocatorScript()}
+                    return findComposer();
+                })();
+                if (!composer) return { sendBtnFound: false };
+                const root = composer.closest('form') || document.body;
                 const primary = root.querySelector(${JSON.stringify(SEND_BUTTON_SELECTOR)})
                     || ${JSON.stringify(SEND_BUTTON_FALLBACK_SELECTORS)}.map(selector => root.querySelector(selector)).find(Boolean);
                 const btns = Array.from(root.querySelectorAll('button'));
@@ -1262,8 +1271,12 @@ async function submitChatGPTMessage(page) {
                 && isVisible(button)
                 && !button.disabled
                 && button.getAttribute('aria-disabled') !== 'true';
-            const form = Array.from(document.querySelectorAll('form')).find((node) => node instanceof HTMLElement && isVisible(node));
-            const root = form || document.body;
+            const composer = (() => {
+                ${buildComposerLocatorScript()}
+                return findComposer();
+            })();
+            if (!composer) return { ready: false };
+            const root = composer.closest('form') || document.body;
             const primary = root.querySelector(${JSON.stringify(SEND_BUTTON_SELECTOR)})
                 || ${JSON.stringify(SEND_BUTTON_FALLBACK_SELECTORS)}.map(selector => root.querySelector(selector)).find(Boolean);
             const labels = ${JSON.stringify(SEND_BUTTON_LABELS)};
@@ -2492,7 +2505,7 @@ async function waitForChatGPTUploadPreview(page, fileNames) {
 
                 // Some attachment chips expose their filename only as an accessible name.
                 // Match the exact name in the composer, not a historical message or control.
-                const chips = Array.from(scope.querySelectorAll('[role="group"][aria-label]')).filter(node => {
+                const chips = Array.from(scope.querySelectorAll('[role="group"][aria-label], [data-composer-attachments] button[aria-label]')).filter(node => {
                     if (node.closest('[hidden], [aria-hidden="true"]')) return false;
                     const rect = node.getBoundingClientRect();
                     if (rect.width <= 0 || rect.height <= 0) return false;
@@ -2596,6 +2609,199 @@ export async function uploadChatGPTImages(page, imagePaths) {
     if (!ready) return { ok: false, reason: 'image upload preview did not appear' };
 
     return { ok: true, files: absPaths };
+}
+
+const CHATGPT_ATTACHMENT_CARD_JS = `
+    const attachmentCard = (node, scope) => {
+        let card = node;
+        for (let current = node; current && current !== scope; current = current.parentElement) {
+            if (current.matches('[class~="group/composer-attachment"]')) return current;
+            if (current.getAttribute('role') === 'group') card = current;
+        }
+        return card;
+    };
+`;
+
+/** Attach documents to the active composer and verify new, ready attachment chips. */
+export async function uploadChatGPTFiles(page, filePaths) {
+    const path = await import('node:path');
+    const prepared = await prepareChatGPTFilePaths(filePaths);
+    if (!prepared.ok) return prepared;
+    const names = prepared.paths.map(file => path.default.basename(file));
+    if (new Set(names).size !== names.length) return { ok: false, reason: 'Attachments must have distinct filenames' };
+    const target = requireObjectEvaluateResult(unwrapEvaluateResult(await page.evaluate(`(() => {
+        ${buildComposerLocatorScript()}
+        const composer = findComposer();
+        const scope = composer?.closest('form');
+        if (!scope) return { ok: false, reason: 'active composer form not found' };
+        document.querySelectorAll('[data-opencli-file-input]').forEach(node => node.removeAttribute('data-opencli-file-input'));
+        // A portal input is allowed only when it is the sole eligible input on the page.
+        document.querySelectorAll('[data-opencli-file-scope]').forEach(node => node.removeAttribute('data-opencli-file-scope'));
+        scope.setAttribute('data-opencli-file-scope', '1');
+        const fileTypes = ${JSON.stringify(prepared.paths.map(file => ({ ext: path.default.extname(file).toLowerCase(), mime: mimeFromFilePath(file) })))};
+        const acceptsFiles = node => {
+            if (node.disabled || node.hasAttribute('capture') || (fileTypes.length > 1 && !node.multiple)) return false;
+            const accept = (node.getAttribute('accept') || '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean);
+            return !accept.length || fileTypes.every(file => accept.some(type => type === '*/*' || type === file.ext || type === file.mime || type.endsWith('/*') && file.mime.startsWith(type.slice(0, -1))));
+        };
+        const local = Array.from(scope.querySelectorAll('input[type="file"]')).filter(acceptsFiles);
+        const inputs = local.length ? local : Array.from(document.querySelectorAll('input[type="file"]'))
+            .filter(node => acceptsFiles(node) && !node.closest('form, [role="dialog"], [data-project-home-sources-surface]'));
+        if (inputs.length !== 1) return { ok: false, reason: 'file input is missing or ambiguous' };
+        inputs[0].setAttribute('data-opencli-file-input', '1');
+        ${CHATGPT_ATTACHMENT_CARD_JS}
+        scope.querySelectorAll('[role="group"][aria-label], [data-composer-attachments] button[aria-label], [data-composer-attachments] [role="button"][aria-label]').forEach(node => attachmentCard(node, scope).setAttribute('data-opencli-existing-file', '1'));
+        return { ok: true };
+    })()`)), 'chatgpt file input targeting');
+    if (!target.ok) return target;
+    const fs = await import('node:fs');
+    let uploaded = false;
+    if (typeof page.setFileInput === 'function') {
+        try {
+            await page.setFileInput(prepared.paths, '[data-opencli-file-input="1"]');
+            uploaded = true;
+        } catch (error) {
+            // These failures occur before native file assignment. Do not retry
+            // arbitrary transport failures that could have already uploaded.
+            if (!/Not allowed|not supported|Unknown action|fileChooserOpened not received/.test(String(error?.message || error))) throw error;
+        }
+    }
+    if (!uploaded) {
+        if (typeof page.evaluateOnce !== 'function') {
+            throw new CommandExecutionError('File upload fallback requires a browser backend with evaluateOnce support.');
+        }
+        if (prepared.paths.some(file => fs.default.statSync(file).size > 25 * 1024 * 1024)) {
+            return { ok: false, reason: 'Uploads over 25 MB require a current Browser Bridge extension with native file-input support' };
+        }
+        // Base64 can exceed the daemon's 1 MB request limit. Stage bounded,
+        // idempotent chunks on the pinned input, then assign files only once.
+        const chunkSize = 192 * 1024;
+        const files = prepared.paths.map(absPath => ({
+            name: path.default.basename(absPath),
+            mime: mimeFromFilePath(absPath),
+            bytes: fs.default.readFileSync(absPath),
+        }));
+        let fallbackResult;
+        try {
+            await page.evaluate(`(() => {
+                const input = document.querySelector('[data-opencli-file-input="1"]');
+                if (!(input instanceof HTMLInputElement)) throw new Error('Pinned file input disappeared');
+                input.__opencliFileChunks = ${JSON.stringify(files.map(file => ({ name: file.name, mime: file.mime, count: Math.max(1, Math.ceil(file.bytes.length / chunkSize)), chunks: [] })))};
+                return true;
+            })()`);
+            for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+                const bytes = files[fileIndex].bytes;
+                const count = Math.max(1, Math.ceil(bytes.length / chunkSize));
+                for (let index = 0; index < count; index += 1) {
+                    const chunk = bytes.subarray(index * chunkSize, (index + 1) * chunkSize).toString('base64');
+                    await page.evaluate(`(() => {
+                        const input = document.querySelector('[data-opencli-file-input="1"]');
+                        if (!input?.__opencliFileChunks) throw new Error('Pinned file input disappeared');
+                        input.__opencliFileChunks[${fileIndex}].chunks[${index}] = ${JSON.stringify(chunk)};
+                        return true;
+                    })()`);
+                }
+            }
+            fallbackResult = requireObjectEvaluateResult(unwrapEvaluateResult(await page.evaluateOnce(`
+            (() => {
+                const input = document.querySelector('[data-opencli-file-input="1"]');
+                const files = input?.__opencliFileChunks;
+                if (!Array.isArray(files)) return { ok: false, reason: 'staged file data is missing' };
+                if (!(input instanceof HTMLInputElement)) {
+                    return { ok: false, reason: 'file input not found' };
+                }
+
+                const dt = new DataTransfer();
+                for (const item of files) {
+                    if (item.chunks.length !== item.count || Array.from({ length: item.count }, (_, index) => item.chunks[index]).some(chunk => typeof chunk !== 'string')) {
+                        return { ok: false, reason: 'staged file data is incomplete' };
+                    }
+                    const parts = item.chunks.map(chunk => {
+                        const binary = atob(chunk);
+                        return Uint8Array.from(binary, char => char.charCodeAt(0));
+                    });
+                    dt.items.add(new File(parts, item.name, { type: item.mime }));
+                }
+                input.files = dt.files;
+
+                const propsKey = Object.keys(input).find(key => key.startsWith('__reactProps$'));
+                if (propsKey && input[propsKey] && typeof input[propsKey].onChange === 'function') {
+                    const nativeEvent = new Event('change', { bubbles: true });
+                    input[propsKey].onChange({
+                        target: input,
+                        currentTarget: input,
+                        nativeEvent,
+                        preventDefault() {},
+                        stopPropagation() {},
+                        isDefaultPrevented() { return false; },
+                        isPropagationStopped() { return false; },
+                        persist() {},
+                    });
+                } else {
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                return { ok: true };
+            })()
+        `)), 'chatgpt file upload fallback');
+        } finally {
+            await page.evaluate(`(() => {
+                const input = document.querySelector('[data-opencli-file-input="1"]');
+                if (input) delete input.__opencliFileChunks;
+                return true;
+            })()`);
+        }
+        if (fallbackResult && !fallbackResult.ok) return fallbackResult;
+    }
+
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+        await page.sleep(1);
+        const ready = requireBooleanEvaluateResult(unwrapEvaluateResult(await page.evaluate(`(() => {
+            ${buildComposerLocatorScript()}
+            const scope = document.querySelector('[data-opencli-file-scope="1"]');
+            if (!scope || findComposer()?.closest('form') !== scope) return false;
+            ${CHATGPT_ATTACHMENT_CARD_JS}
+            const names = ${JSON.stringify(names)};
+            const chips = Array.from(scope.querySelectorAll('[role="group"][aria-label], [data-composer-attachments] button[aria-label], [data-composer-attachments] [role="button"][aria-label]')).filter(node => {
+                if (node.closest('[data-opencli-existing-file]') || node.closest('[hidden], [aria-hidden="true"]')) return false;
+                const card = attachmentCard(node, scope);
+                if (!isVisible(node) || card.matches('[aria-busy="true"]') || card.querySelector('[role="progressbar"], [aria-busy="true"], [role="alert"]')) return false;
+                for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+                    const style = getComputedStyle(ancestor);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                }
+                return true;
+            });
+            const assigned = new Map();
+            const matchesName = (label, name) => {
+                if (label === name) return true;
+                const dot = name.lastIndexOf('.');
+                const base = dot > 0 ? name.slice(0, dot) : name;
+                const ext = dot > 0 ? name.slice(dot) : '';
+                if (!label.startsWith(base) || !label.endsWith(ext)) return false;
+                const suffix = label.slice(base.length, ext ? -ext.length : undefined).trim();
+                return /^\\(\\d+\\)$/.test(suffix);
+            };
+            const assign = (nameIndex, seen) => {
+                const name = names[nameIndex];
+                const candidates = chips.filter(node => matchesName(node.getAttribute('aria-label') || '', name));
+                candidates.sort((a, b) => Number(b.getAttribute('aria-label') === name) - Number(a.getAttribute('aria-label') === name));
+                for (const node of candidates) {
+                    const card = attachmentCard(node, scope);
+                    if (seen.has(card)) continue;
+                    seen.add(card);
+                    if (!assigned.has(card) || assign(assigned.get(card), seen)) {
+                        assigned.set(card, nameIndex);
+                        return true;
+                    }
+                }
+                return false;
+            };
+            return names.every((_, index) => assign(index, new Set()));
+        })()`)), 'chatgpt file attachment readiness');
+        if (ready) return { ok: true, files: prepared.paths };
+    }
+    return { ok: false, reason: 'new ready attachment chips did not appear in the active composer; prompt was not sent' };
 }
 
 /**
